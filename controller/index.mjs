@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 
 export default async function run(guias) {
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -39,27 +39,45 @@ export default async function run(guias) {
         console.log(
           `Error con la guía ${guia}: No se pudo consultar el número de guía ingresado.`
         );
-        await newPage.locator('.modalPopupError .button-blue[type="submit"]').click();
+        await newPage
+          .locator('.modalPopupError .button-blue[type="submit"]')
+          .click();
       } else {
         let shipmentDetails = {
           num_guia: guia,
           remitente: {
-            tipo_identificacion: await newPage.inputValue('input[name="tbxTipIdentificacion"]'),  
-            numero_identificacion: await newPage.inputValue('input[name="tbxIdentificacionRemi"]'), 
-            nombre: await newPage.inputValue('input[name="tbxNombreRemitente"]'),
-            direccion: await newPage.inputValue('input[name="tbxDireccionRemi"]'),
+            tipo_identificacion: await newPage.inputValue(
+              'input[name="tbxTipIdentificacion"]'
+            ),
+            numero_identificacion: await newPage.inputValue(
+              'input[name="tbxIdentificacionRemi"]'
+            ),
+            nombre: await newPage.inputValue(
+              'input[name="tbxNombreRemitente"]'
+            ),
+            direccion: await newPage.inputValue(
+              'input[name="tbxDireccionRemi"]'
+            ),
             celular: await newPage.inputValue('input[name="tbxTelefonoRem"]'),
             correo: await newPage.inputValue('input[name="tbxCorreoRem"]'),
           },
           destinatario: {
-            tipo_identificacion: await newPage.inputValue('input[name="tbxTipIdentificacionDes"]'),
-            numero_identificacion: await newPage.inputValue('input[name="tbxIdentificacionDes"]'), 
+            tipo_identificacion: await newPage.inputValue(
+              'input[name="tbxTipIdentificacionDes"]'
+            ),
+            numero_identificacion: await newPage.inputValue(
+              'input[name="tbxIdentificacionDes"]'
+            ),
             nombre: await newPage.inputValue('input[name="tbxNombreDes"]'),
-            direccion: await newPage.inputValue('input[name="tbxDireccionDes"]'), 
+            direccion: await newPage.inputValue(
+              'input[name="tbxDireccionDes"]'
+            ),
             celular: await newPage.inputValue('input[name="tbxTelefonoDes"]'),
             correo: await newPage.inputValue('input[name="tbxCorreoDes"]'),
           },
-          tipo_entrega: await newPage.inputValue('input[name="tbxTipoEntrega"]'), 
+          tipo_entrega: await newPage.inputValue(
+            'input[name="tbxTipoEntrega"]'
+          ),
           pago: await newPage.inputValue('input[name="txtFormaPago"]'),
           ciudad: await newPage.inputValue('input[name="tbxCiudadOrigen"]'),
           servicio: await newPage.inputValue('input[name="tbxServicio"]'),
@@ -81,6 +99,6 @@ export default async function run(guias) {
     // await newPage.waitForTimeout(500); // Esperar 0.5 segundos entre cada consulta
   }
   console.log(JSON.stringify(data, null, 2));
-  return data
+  return data;
   //   await browser.close();
 }

@@ -14,7 +14,7 @@ app.post("/consult", async (req, res) => {
       .status(400)
       .json({ error: "No se proporcionaron guías válidas" });
   }
-  import("./index.mjs")
+  import("./controller/index.mjs")
     .then(async (module) => {
       const data = await module.default(guias);
       res.json(data);
