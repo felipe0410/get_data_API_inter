@@ -43,8 +43,24 @@ export default async function run(guias) {
           .locator('.modalPopupError .button-blue[type="submit"]')
           .click();
       } else {
+        const currentDate = new Date().toISOString();
         let shipmentDetails = {
-          num_guia: guia,
+          addressee: await newPage.inputValue('input[name="tbxNombreDes"]'),
+          box: null,
+          courierAttempt1: null,
+          courierAttempt2: null,
+          courierAttempt3: null,
+          deliverTo: await newPage.inputValue('input[name="tbxTipoEntrega"]'),
+          deliveryDate: null,
+          guide: guia,
+          intakeDate: currentDate,
+          packageNumber: null,
+          returnDate: null,
+          shippingCost: await newPage.inputValue("#tbxValorComercial"),
+          status: "oficina",
+          uid: guia,
+          updateDate: null,
+          revision: false,
           remitente: {
             tipo_identificacion: await newPage.inputValue(
               'input[name="tbxTipIdentificacion"]'
@@ -75,9 +91,6 @@ export default async function run(guias) {
             celular: await newPage.inputValue('input[name="tbxTelefonoDes"]'),
             correo: await newPage.inputValue('input[name="tbxCorreoDes"]'),
           },
-          tipo_entrega: await newPage.inputValue(
-            'input[name="tbxTipoEntrega"]'
-          ),
           pago: await newPage.inputValue('input[name="txtFormaPago"]'),
           ciudad: await newPage.inputValue('input[name="tbxCiudadOrigen"]'),
           servicio: await newPage.inputValue('input[name="tbxServicio"]'),
@@ -99,6 +112,6 @@ export default async function run(guias) {
     // await newPage.waitForTimeout(500); // Esperar 0.5 segundos entre cada consulta
   }
   console.log(JSON.stringify(data, null, 2));
+  await browser.close();
   return data;
-  //   await browser.close();
 }
