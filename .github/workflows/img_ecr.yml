@@ -1,0 +1,42 @@
+name: Deploy Docker Image to Amazon ECR
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::058264459774:role/ig-github-actions-assume-role
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: us-east-2
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 058264459774.dkr.ecr.us-east-2.amazonaws.com
+
+      - name: Build Docker image
+        run: docker build -t interrapidisimo/api .
+
+      - name: Tag Docker image
+        run: docker tag interrapidisimo/api:latest 058264459774.dkr.ecr.us-east-2.amazonaws.com/interrapidisimo/api:latest
+
+      - name: Push Docker image to Amazon ECR
+        run: docker push 058264459774.dkr.ecr.us-east-2.amazonaws.com/interrapidisimo/api:latest
+
+      - name: Deploy to Amazon ECS
+        env:
+          CLUSTER_NAME: "your-ecs-cluster-name"
+          SERVICE_NAME: "your-service-name"
+          IMAGE_URI: "058264459774.dkr.ecr.us-east-2.amazonaws.com/interrapidisimo/api:latest"
+        run: |
+          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment

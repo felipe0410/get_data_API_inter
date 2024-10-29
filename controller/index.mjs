@@ -1,4 +1,4 @@
-import { chromium , firefox} from "playwright";
+import { chromium } from "playwright";
 
 // Función para agregar un delay entre consultas
 function delay(ms) {
@@ -6,7 +6,7 @@ function delay(ms) {
 }
 
 export default async function run(guias, password) {
-  const browser = await firefox.launch({ headless: false });
+  const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -20,13 +20,36 @@ export default async function run(guias, password) {
     .waitFor({ state: "visible" });
   await page.locator('div[title="Explorador Envios"]').click();
 
-  const [newPage] = await Promise.all([context.waitForEvent("page")]);
-
+  // Abrimos la primera pestaña nueva (Explorador Envios)
+  let newPage = (await context.waitForEvent("page"));
   await newPage.waitForLoadState("networkidle");
 
+  const correctUrl =
+    "http://reportes.interrapidisimo.com/Reportes/ExploradorEnvios/ExploradorEnvios.aspx";
   let data = [];
 
-  for (const guia of guias) {
+  for (let i = 0; i < guias.length; i++) {
+    const guia = guias[i];
+
+    // Verificamos si estamos en la URL correcta en la nueva pestaña
+    if (newPage.url() !== correctUrl) {
+      console.log(
+        `No estamos en la página correcta. Haciendo clic nuevamente en "Explorador Envios"...`
+      );
+      
+      // Volvemos a la pestaña principal y hacemos clic en "Explorador Envios"
+      await page.locator('div[title="Explorador Envios"]').click();
+
+      // Cerramos la pestaña anterior y capturamos la nueva pestaña
+      await newPage.close();
+      newPage = (await context.waitForEvent("page"));
+      await newPage.waitForLoadState("networkidle");
+
+      // Reiniciamos la espera para la página correcta
+      await delay(2000);
+    }
+
+    // Rellenar el número de guía
     await newPage.locator("#tbxNumeroGuia").fill(guia);
 
     let retryCount = 0;
@@ -35,7 +58,28 @@ export default async function run(guias, password) {
     while (retryCount < maxRetries) {
       try {
         await newPage.locator("#btnShow").click();
-        await delay(1000);
+        await delay(500); // Esperamos 2 segundos después de la consulta
+
+        // Verificamos si estamos en la URL correcta después de la consulta
+        if (newPage.url() !== correctUrl) {
+          console.log(
+            `Nos salimos de la página correcta. Haciendo clic en "Explorador Envios" nuevamente...`
+          );
+          
+          // Hacemos clic nuevamente en "Explorador Envios" para reabrir la pestaña
+          await page.locator('div[title="Explorador Envios"]').click();
+
+          // Cerramos la pestaña anterior y capturamos la nueva pestaña
+          await newPage.close();
+          newPage = (await context.waitForEvent("page"));
+          await newPage.waitForLoadState("networkidle");
+
+          // Reiniciamos la consulta desde la misma guía
+          i--; // Retrocedemos en el índice para volver a intentar la consulta con la misma guía
+          break; // Salimos del bucle para intentar nuevamente
+        }
+
+        // Esperamos a que se cargue el resultado de la guía o se muestre un error
         await newPage.waitForFunction(
           () =>
             document.querySelector(".styleTextBox") ||
@@ -44,6 +88,7 @@ export default async function run(guias, password) {
           { timeout: 30000 }
         );
 
+        // Verificamos si hubo un error en la consulta
         const hasError = await newPage.locator(".modalPopupError").isVisible();
         if (hasError) {
           console.log(
@@ -54,7 +99,7 @@ export default async function run(guias, password) {
             .click();
           retryCount++;
         } else {
-          break;
+          break; // Si no hay errores, salimos del bucle de reintentos
         }
       } catch (error) {
         console.error(

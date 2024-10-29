@@ -56,6 +56,12 @@ app.post("/consult", async (req, res) => {
 //     });
 // });
 
+
+app.use(cors({
+  origin: '*',
+}));
+
+
 app.listen(port, () => {
   console.log(`Server running on http://0.0.0.0:${port}`);
 });
