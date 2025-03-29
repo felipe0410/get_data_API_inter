@@ -14,6 +14,7 @@ app.get("/health", (req, res) => {
 });
 
 app.post("/consult", async (req, res) => {
+  console.log("req:::>", req);
   const guias = req.body.guias;
   const password = req.body.password;
   console.log("start getdata");
@@ -37,30 +38,30 @@ app.post("/consult", async (req, res) => {
     });
 });
 
-// app.post("/whatsapp", async (req, res) => {
-//   const guias = req.body.guias;
-//   const password = req.body.password;
-//   console.log("start getdata whatsaap");
-//   import("./controller/whatsapp.mjs")
-//     .then(async (module) => {
-//       const data = await module.default();
-//       res.json(data);
-//     })
-//     .catch((err) => {
-//       console.error(err);
-//       res.status(500).json({
-//         error: "Error al procesar la solicitud",
-//         message: err.message || "Unknown error",
-//         stack: err.stack,
-//       });
-//     });
-// });
+app.post("/whatsapp", async (req, res) => {
+  const guias = req.body.guias;
+  const password = req.body.password;
+  console.log("start getdata whatsaap");
+  import("./controller/whatsapp.mjs")
+    .then(async (module) => {
+      const data = await module.default();
+      res.json(data);
+    })
+    .catch((err) => {
+      console.error(err);
+      res.status(500).json({
+        error: "Error al procesar la solicitud",
+        message: err.message || "Unknown error",
+        stack: err.stack,
+      });
+    });
+});
 
-
-app.use(cors({
-  origin: '*',
-}));
-
+app.use(
+  cors({
+    origin: "*",
+  })
+);
 
 app.listen(port, () => {
   console.log(`Server running on http://0.0.0.0:${port}`);

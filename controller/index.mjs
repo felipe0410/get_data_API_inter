@@ -21,7 +21,7 @@ export default async function run(guias, password) {
   await page.locator('div[title="Explorador Envios"]').click();
 
   // Abrimos la primera pestaña nueva (Explorador Envios)
-  let newPage = (await context.waitForEvent("page"));
+  let newPage = await context.waitForEvent("page");
   await newPage.waitForLoadState("networkidle");
 
   const correctUrl =
@@ -36,13 +36,13 @@ export default async function run(guias, password) {
       console.log(
         `No estamos en la página correcta. Haciendo clic nuevamente en "Explorador Envios"...`
       );
-      
+
       // Volvemos a la pestaña principal y hacemos clic en "Explorador Envios"
       await page.locator('div[title="Explorador Envios"]').click();
 
       // Cerramos la pestaña anterior y capturamos la nueva pestaña
       await newPage.close();
-      newPage = (await context.waitForEvent("page"));
+      newPage = await context.waitForEvent("page");
       await newPage.waitForLoadState("networkidle");
 
       // Reiniciamos la espera para la página correcta
@@ -53,25 +53,25 @@ export default async function run(guias, password) {
     await newPage.locator("#tbxNumeroGuia").fill(guia);
 
     let retryCount = 0;
-    const maxRetries = 1;
+    const maxRetries = 3;
 
     while (retryCount < maxRetries) {
       try {
         await newPage.locator("#btnShow").click();
-        await delay(500); // Esperamos 2 segundos después de la consulta
+        await delay(1000); // Esperamos 2 segundos después de la consulta
 
         // Verificamos si estamos en la URL correcta después de la consulta
         if (newPage.url() !== correctUrl) {
           console.log(
             `Nos salimos de la página correcta. Haciendo clic en "Explorador Envios" nuevamente...`
           );
-          
+
           // Hacemos clic nuevamente en "Explorador Envios" para reabrir la pestaña
           await page.locator('div[title="Explorador Envios"]').click();
 
           // Cerramos la pestaña anterior y capturamos la nueva pestaña
           await newPage.close();
-          newPage = (await context.waitForEvent("page"));
+          newPage = await context.waitForEvent("page");
           await newPage.waitForLoadState("networkidle");
 
           // Reiniciamos la consulta desde la misma guía
@@ -118,8 +118,21 @@ export default async function run(guias, password) {
     }
 
     try {
+      const colombiaDate = new Date().toLocaleDateString("en-CA", {
+        timeZone: "America/Bogota",
+      });
+
+      const colombiaTimestamp = new Date(
+        colombiaDate + "T00:00:00-05:00"
+      ).getTime();
+
       const currentDate = new Date().toISOString();
+      await newPage.waitForSelector('input[name="tbxNombreDes"]', {
+        timeout: 10000,
+      });
       let shipmentDetails = {
+        timestamp: colombiaTimestamp,
+        colombiaDate,
         addressee: await newPage.inputValue('input[name="tbxNombreDes"]'),
         box: null,
         courierAttempt1: null,
@@ -182,4 +195,5 @@ export default async function run(guias, password) {
   console.log(JSON.stringify(data, null, 2));
   await browser.close();
   return data;
+
 }
