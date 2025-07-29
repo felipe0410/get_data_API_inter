@@ -14,7 +14,6 @@ app.get("/health", (req, res) => {
 });
 
 app.post("/consult", async (req, res) => {
-  console.log("req:::>", req);
   const guias = req.body.guias;
   const password = req.body.password;
   console.log("start getdata");
@@ -24,6 +23,30 @@ app.post("/consult", async (req, res) => {
       .json({ error: "No se proporcionaron guías válidas" });
   }
   import("./controller/index.mjs")
+    .then(async (module) => {
+      const data = await module.default(guias, password);
+      res.json(data);
+    })
+    .catch((err) => {
+      console.error(err);
+      res.status(500).json({
+        error: "Error al procesar la solicitud",
+        message: err.message || "Unknown error",
+        stack: err.stack,
+      });
+    });
+});
+
+app.post("/entregar", async (req, res) => {
+  const guias = req.body.guias;
+  const password = req.body.password;
+  console.log("start getdata entregar");
+  if (!guias || !Array.isArray(guias) || guias.length === 0) {
+    return res
+      .status(400)
+      .json({ error: "No se proporcionaron guías válidas" });
+  }
+  import("./controller/entrega.mjs")
     .then(async (module) => {
       const data = await module.default(guias, password);
       res.json(data);

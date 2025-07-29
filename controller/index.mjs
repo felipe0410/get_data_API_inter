@@ -58,28 +58,36 @@ export default async function run(guias, password) {
     while (retryCount < maxRetries) {
       try {
         await newPage.locator("#btnShow").click();
-        await delay(1000); // Esperamos 2 segundos después de la consulta
+        await delay(1000);
 
-        // Verificamos si estamos en la URL correcta después de la consulta
-        if (newPage.url() !== correctUrl) {
-          console.log(
-            `Nos salimos de la página correcta. Haciendo clic en "Explorador Envios" nuevamente...`
-          );
+        // Detectar si la página muestra el error ASP.NET
+        const pageTitle = await newPage.title();
+        const isServerError = pageTitle.includes("Server Error");
 
-          // Hacemos clic nuevamente en "Explorador Envios" para reabrir la pestaña
-          await page.locator('div[title="Explorador Envios"]').click();
-
-          // Cerramos la pestaña anterior y capturamos la nueva pestaña
+        if (isServerError) {
+          console.log(`⚠️ Error del servidor detectado para la guía ${guia}. Cerrando pestaña y reintentando...`);
           await newPage.close();
+          await page.locator('div[title="Explorador Envios"]').click();
           newPage = await context.waitForEvent("page");
           await newPage.waitForLoadState("networkidle");
-
-          // Reiniciamos la consulta desde la misma guía
-          i--; // Retrocedemos en el índice para volver a intentar la consulta con la misma guía
-          break; // Salimos del bucle para intentar nuevamente
+          await delay(2000);
+          i--; // Reintentar la misma guía
+          break;
         }
 
-        // Esperamos a que se cargue el resultado de la guía o se muestre un error
+        // Verificamos si nos redirigieron fuera
+        if (newPage.url() !== correctUrl) {
+          console.log(`Nos salimos de la página correcta. Reabriendo...`);
+          await newPage.close();
+          await page.locator('div[title="Explorador Envios"]').click();
+          newPage = await context.waitForEvent("page");
+          await newPage.waitForLoadState("networkidle");
+          await delay(2000);
+          i--;
+          break;
+        }
+
+        // Esperar datos o error modal
         await newPage.waitForFunction(
           () =>
             document.querySelector(".styleTextBox") ||
@@ -88,27 +96,29 @@ export default async function run(guias, password) {
           { timeout: 30000 }
         );
 
-        // Verificamos si hubo un error en la consulta
         const hasError = await newPage.locator(".modalPopupError").isVisible();
         if (hasError) {
-          console.log(
-            `Error con la guía ${guia}: No se pudo consultar el número de guía ingresado.`
-          );
-          await newPage
-            .locator('.modalPopupError .button-blue[type="submit"]')
-            .click();
+          console.log(`Error con la guía ${guia}: No se pudo consultar el número de guía ingresado.`);
+          await newPage.locator('.modalPopupError .button-blue[type="submit"]').click();
           retryCount++;
         } else {
-          break; // Si no hay errores, salimos del bucle de reintentos
+          break; // Consulta exitosa
         }
       } catch (error) {
-        console.error(
-          `Error al intentar hacer clic en #btnShow para la guía ${guia}:`,
-          error
-        );
+        console.error(`Error al procesar la guía ${guia}:`, error);
+
+        if (newPage.isClosed()) {
+          console.log("🔄 La pestaña se cerró. Reabriendo 'Explorador Envios'...");
+          await page.locator('div[title="Explorador Envios"]').click();
+          newPage = await context.waitForEvent("page");
+          await newPage.waitForLoadState("networkidle");
+          await delay(2000);
+        }
+
         retryCount++;
       }
     }
+
 
     if (retryCount === maxRetries) {
       console.error(
