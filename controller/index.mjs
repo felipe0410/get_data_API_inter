@@ -24,15 +24,17 @@ export default async function run(guias, password) {
   let newPage = await context.waitForEvent("page");
   await newPage.waitForLoadState("networkidle");
 
-  const correctUrl =
-    "http://reportes.interrapidisimo.com/Reportes/ExploradorEnvios/ExploradorEnvios.aspx";
+  // Comparamos solo por la ruta para no depender del protocolo (http/https)
+  // ni del puerto (ej. :8081), que pueden cambiar.
+  const correctPath = "/Reportes/ExploradorEnvios/ExploradorEnvios.aspx";
+  const isOnCorrectPage = (url) => url.includes(correctPath);
   let data = [];
 
   for (let i = 0; i < guias.length; i++) {
     const guia = guias[i];
 
     // Verificamos si estamos en la URL correcta en la nueva pestaña
-    if (newPage.url() !== correctUrl) {
+    if (!isOnCorrectPage(newPage.url())) {
       console.log(
         `No estamos en la página correcta. Haciendo clic nuevamente en "Explorador Envios"...`
       );
@@ -76,7 +78,7 @@ export default async function run(guias, password) {
         }
 
         // Verificamos si nos redirigieron fuera
-        if (newPage.url() !== correctUrl) {
+        if (!isOnCorrectPage(newPage.url())) {
           console.log(`Nos salimos de la página correcta. Reabriendo...`);
           await newPage.close();
           await page.locator('div[title="Explorador Envios"]').click();
