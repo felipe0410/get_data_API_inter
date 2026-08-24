@@ -49,9 +49,13 @@ un login anterior correcto.
 
 ## Antes del primer deploy
 
-1. **Secret en GitHub**: `FIREBASE_SA_JSON` con el Service Account de Firebase,
-   igual que en go-pos. El worker escribe en Firestore, así que sin eso no
-   arranca. (El de la contraseña de Inter NO existe: esa viaja en la request.)
+1. **Secrets en GitHub**:
+   - `FIREBASE_SA_JSON`: Service Account de Firebase, igual que en go-pos. El
+     worker escribe en Firestore, así que sin eso no arranca.
+   - `NOTIFY_TOKEN`: secreto compartido con la ruta de WhatsApp de la web
+     (`openssl rand -hex 32`). El mismo valor va en el `.env` de la web.
+
+   (El de la contraseña de Inter NO existe: esa viaja en la request.)
 2. **Rol OIDC**: el workflow asume `arn:aws:iam::140862068477:role/github-ci-cd`
    (el mismo de go-pos). Necesita permisos para Lambda, API Gateway, Cognito,
    IAM, CloudWatch Logs y el bucket de state. Si el rol quedó acotado a los
@@ -135,6 +139,31 @@ un límite técnico.
 
 Para calibrar con datos reales: el campo `msPorGuia` del job trae el promedio
 medido, y en CloudWatch está la línea `[worker] job ... completado`.
+
+## WhatsApp
+
+Al terminar cada tramo, el worker le pide a la web que despache los mensajes:
+
+```
+POST {WEB_API_BASE}/api/whatsapp/notify-shipments
+     x-notify-token: <NOTIFY_TOKEN>
+     { shipments: [...], tipo: "oficina" | "domiciliario" }
+```
+
+La lógica de plantillas y la API key de Infobip se quedan en la web: no tienen
+por qué vivir en dos lados. El worker solo dispara, y así el navegador no
+necesita seguir abierto hasta que termine el guardado.
+
+Se notifica **por tramo**, no al final del job: los destinatarios de las
+primeras guías reciben el mensaje sin esperar a que termine todo.
+
+Si la notificación falla, **no se cae el job**: las guías ya están en Firestore,
+que es lo que importa. El fallo queda en `errores` con `etapa: "whatsapp"` y en
+los contadores `whatsappEnviados` / `whatsappFallidos`.
+
+Del lado de la web hay que aplicar `client-snippets/notify-shipments-auth.ts`:
+esa ruta hoy es un POST abierto. Y hay que sacar la llamada que hace
+`getData/page.tsx` desde el navegador, o cada envío se notificaría dos veces.
 
 ## Reintentos
 

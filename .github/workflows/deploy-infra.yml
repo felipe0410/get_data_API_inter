@@ -85,6 +85,7 @@ jobs:
         id: plan
         env:
           TF_VAR_firebase_sa_json: ${{ secrets.FIREBASE_SA_JSON }}
+          TF_VAR_notify_token: ${{ secrets.NOTIFY_TOKEN }}
         run: terraform plan -var="env=dev" -var="aws_region=${{ env.AWS_REGION }}" -no-color -out=tfplan
         continue-on-error: true
 
@@ -96,4 +97,5 @@ jobs:
         if: github.ref == 'refs/heads/feat/lambda-consult'
         env:
           TF_VAR_firebase_sa_json: ${{ secrets.FIREBASE_SA_JSON }}
+          TF_VAR_notify_token: ${{ secrets.NOTIFY_TOKEN }}
         run: terraform apply -auto-approve tfplan

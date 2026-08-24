@@ -25,6 +25,13 @@ const lambda = new LambdaClient({});
 const USER = process.env.INTER_USER || "aquitania.boyaca";
 const BATCH_LIMIT = 500; // límite duro de writeBatch en Firestore
 
+// La notificación por WhatsApp la sigue haciendo la web: ahí viven la lógica de
+// plantillas y la API key de Infobip, que no tiene por qué estar en dos lados.
+// El worker solo la dispara, para que el navegador no tenga que seguir abierto
+// hasta que termine el guardado.
+const WEB_API_BASE = process.env.WEB_API_BASE;
+const NOTIFY_TOKEN = process.env.NOTIFY_TOKEN;
+
 // Cuánto tiempo se permite trabajar antes de encadenar otro tramo. El techo de
 // Lambda son 15 min; se corta antes para que quede margen de sobra para el
 // último writeBatch y para invocar la continuación.
@@ -129,6 +136,48 @@ async function guardar(docs) {
   return guardados;
 }
 
+/**
+ * Dispara los WhatsApp de los envíos recién guardados.
+ *
+ * No es fatal: si falla, las guías ya quedaron en Firestore, que es lo que
+ * importa. El resultado se registra en el job para que se vea desde la web.
+ */
+async function notificar(docs, domiciliary) {
+  if (!docs.length) return null;
+  if (!WEB_API_BASE) {
+    console.warn("[worker] WEB_API_BASE sin configurar: no se notifica por WhatsApp");
+    return null;
+  }
+
+  // El centinela de serverTimestamp no sobrevive a JSON.stringify, y la ruta
+  // de la web no lo usa: se saca antes de mandar.
+  const shipments = docs.map(({ fecha_de_admision_timestamp, ...resto }) => resto);
+
+  try {
+    const res = await fetch(`${WEB_API_BASE}/api/whatsapp/notify-shipments`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(NOTIFY_TOKEN ? { "x-notify-token": NOTIFY_TOKEN } : {}),
+      },
+      body: JSON.stringify({
+        shipments,
+        tipo: domiciliary ? "domiciliario" : "oficina",
+      }),
+    });
+    if (!res.ok) {
+      const detalle = await res.text();
+      throw new Error(`${res.status}: ${detalle.slice(0, 200)}`);
+    }
+    const r = await res.json();
+    console.log(`[worker] WhatsApp: ${r.sent}/${r.total} enviados`);
+    return { enviados: r.sent ?? 0, fallidos: r.failed ?? 0, total: r.total ?? shipments.length };
+  } catch (error) {
+    console.error("[worker] falló la notificación por WhatsApp:", error.message);
+    return { enviados: 0, fallidos: shipments.length, total: shipments.length, error: error.message };
+  }
+}
+
 export const handler = async (event) => {
   const { jobId, items, password, domiciliary, tramo = 0 } = event;
   const ref = jobRef(jobId);
@@ -171,15 +220,33 @@ export const handler = async (event) => {
     }
 
     const guardadas = docs.length ? await guardar(docs) : 0;
+
+    // Se notifica por tramo y no al final del job: así los destinatarios de las
+    // primeras guías reciben el mensaje sin esperar a que termine todo, y no
+    // hay que acarrear los documentos de un tramo al siguiente.
+    const wa = guardadas ? await notificar(docs, domiciliary) : null;
+
     const transcurrido = Date.now() - inicio;
     const procesadas = docs.length + sinDatos + errores.length;
+
+    // Un solo arrayUnion con todo: si `errores` apareciera dos veces en el
+    // literal, la segunda clave pisaría a la primera y se perderían los fallos
+    // de guía cuando además falla el WhatsApp.
+    const paraRegistrar = [...errores];
+    if (wa?.error) paraRegistrar.push({ etapa: "whatsapp", message: wa.error });
 
     await ref.update({
       procesadas: FieldValue.increment(procesadas),
       guardadas: FieldValue.increment(guardadas),
       sinDatos: FieldValue.increment(sinDatos),
       // arrayUnion() sin argumentos lanza: el campo solo se toca si hubo algo.
-      ...(errores.length ? { errores: FieldValue.arrayUnion(...errores) } : {}),
+      ...(paraRegistrar.length ? { errores: FieldValue.arrayUnion(...paraRegistrar) } : {}),
+      ...(wa
+        ? {
+            whatsappEnviados: FieldValue.increment(wa.enviados),
+            whatsappFallidos: FieldValue.increment(wa.fallidos),
+          }
+        : {}),
       msPorGuia: procesadas ? Math.round(transcurrido / procesadas) : null,
       actualizadoEn: FieldValue.serverTimestamp(),
     });

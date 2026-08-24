@@ -35,6 +35,19 @@ variable "inter_delay_ms" {
   default     = 500
 }
 
+variable "web_api_base" {
+  description = "Base de la web. El worker le pide que despache los WhatsApp."
+  type        = string
+  default     = "https://systemdelivery-e610d.web.app"
+}
+
+variable "notify_token" {
+  description = "Secreto compartido con /api/whatsapp/notify-shipments"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "presupuesto_ms" {
   description = "Tiempo que trabaja un tramo antes de encadenar el siguiente"
   type        = number
@@ -142,6 +155,8 @@ resource "aws_lambda_function" "worker" {
   environment {
     variables = merge(local.lambda_env_comun, {
       PRESUPUESTO_MS = tostring(var.presupuesto_ms)
+      WEB_API_BASE   = var.web_api_base
+      NOTIFY_TOKEN   = var.notify_token
     })
   }
 
