@@ -1,0 +1,94 @@
+name: Deploy Infra (Lambda /consult)
+
+# ⚠️ TEMPORAL: mientras se prueba, el deploy corre desde la rama de trabajo y
+# no desde main. Antes de mergear hay que devolver las dos referencias a
+# `main`: la de `branches` acá abajo y la condición del paso "Terraform Apply".
+on:
+  push:
+    branches:
+      - feat/lambda-consult
+    paths:
+      - "infra/**"
+      - "lambda/**"
+      - "controller/**"
+      - "scripts/build-lambda.sh"
+      - ".github/workflows/deploy-infra.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.9.0"
+  AWS_REGION: "us-east-1"
+  TF_WORKING_DIR: "infra"
+  STATE_BUCKET: "system-delivery-inter-tfstate-140862068477"
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::140862068477:role/github-ci-cd
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create Terraform state bucket (idempotent)
+        run: |
+          aws s3api head-bucket --bucket ${{ env.STATE_BUCKET }} 2>/dev/null || \
+            aws s3api create-bucket \
+              --bucket ${{ env.STATE_BUCKET }} \
+              --region ${{ env.AWS_REGION }}
+          aws s3api put-bucket-versioning \
+            --bucket ${{ env.STATE_BUCKET }} \
+            --versioning-configuration Status=Enabled 2>/dev/null || true
+        working-directory: .
+
+      # Copia controller/*.mjs a lambda/consult/lib/. Tiene que correr ANTES de
+      # cualquier comando de Terraform: archive_file lee el directorio al hacer
+      # el plan, no al aplicar.
+      - name: Build Lambda package
+        run: ./scripts/build-lambda.sh
+        working-directory: .
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init -reconfigure -backend-config="bucket=${{ env.STATE_BUCKET }}"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        env:
+          TF_VAR_inter_password: ${{ secrets.INTER_PASSWORD }}
+        run: terraform plan -var="env=dev" -var="aws_region=${{ env.AWS_REGION }}" -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/feat/lambda-consult'
+        env:
+          TF_VAR_inter_password: ${{ secrets.INTER_PASSWORD }}
+        run: terraform apply -auto-approve tfplan

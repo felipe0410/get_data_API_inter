@@ -1,0 +1,8 @@
+{
+  "name": "inter-consult-lambda",
+  "version": "1.0.0",
+  "description": "Lambda de consulta de guías en Interrapidisimo (HTTP puro, sin dependencias)",
+  "type": "module",
+  "main": "index.mjs",
+  "private": true
+}
