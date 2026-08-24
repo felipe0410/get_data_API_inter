@@ -57,15 +57,11 @@ export const handler = async (event) => {
     return response(400, { error: "cada guía debe ser un string no vacío" });
   }
 
-  // La contraseña vive en la configuración de la Lambda, no viaja desde el
-  // cliente. Se acepta por body solo como puente durante la migración desde
-  // el ECS, y queda registrado en el log para poder retirarlo.
-  const password = process.env.INTER_PASSWORD || body.password;
-  if (!password) {
-    return response(500, { error: "INTER_PASSWORD no está configurada" });
-  }
-  if (!process.env.INTER_PASSWORD) {
-    console.warn("Usando la contraseña recibida en el body: configurar INTER_PASSWORD.");
+  // La contraseña es del operador y llega en cada request: no es config del
+  // despliegue. Nunca se loguea ni se guarda; solo se pasa a `run`.
+  const { password } = body;
+  if (typeof password !== "string" || !password) {
+    return response(400, { error: "password es requerido" });
   }
 
   const inicio = Date.now();

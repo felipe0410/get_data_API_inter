@@ -12,12 +12,6 @@ variable "inter_user" {
   default     = "aquitania.boyaca"
 }
 
-variable "inter_password" {
-  description = "Contraseña del portal de Interrapidísimo (desde GitHub Secrets)"
-  type        = string
-  sensitive   = true
-}
-
 variable "max_guias" {
   description = "Tope de guías por request. Existe por el corte de 30s del API Gateway."
   type        = number
@@ -87,10 +81,12 @@ resource "aws_lambda_function" "consult" {
   filename         = data.archive_file.lambda_consult.output_path
   source_code_hash = data.archive_file.lambda_consult.output_base64sha256
 
+  # La contraseña del portal NO va acá: es del operador y llega en el body de
+  # cada request. Meterla como variable de entorno la volvería única y
+  # compartida, que es justo lo contrario de como funciona.
   environment {
     variables = {
       INTER_USER     = var.inter_user
-      INTER_PASSWORD = var.inter_password
       INTER_DELAY_MS = tostring(var.inter_delay_ms)
       MAX_GUIAS      = tostring(var.max_guias)
     }

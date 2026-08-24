@@ -78,8 +78,6 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        env:
-          TF_VAR_inter_password: ${{ secrets.INTER_PASSWORD }}
         run: terraform plan -var="env=dev" -var="aws_region=${{ env.AWS_REGION }}" -no-color -out=tfplan
         continue-on-error: true
 
@@ -89,6 +87,4 @@ jobs:
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/feat/lambda-consult'
-        env:
-          TF_VAR_inter_password: ${{ secrets.INTER_PASSWORD }}
         run: terraform apply -auto-approve tfplan

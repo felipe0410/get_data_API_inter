@@ -16,14 +16,30 @@ Web ──POST /api/inter-token──> Next.js (server) ──> Cognito /oauth2/
                                                  Lambda ──HTTP──> Interrapidísimo
 ```
 
+## La contraseña del portal
+
+Es del operador y **viaja en el body de cada request**, junto con las guías.
+No es configuración del despliegue: no hay `INTER_PASSWORD` ni en la Lambda ni
+en los secrets del repo, y el workflow no necesita ninguno.
+
+```json
+{ "guias": ["105600", "105601"], "password": "<la del operador>" }
+```
+
+Lo único fijo es `INTER_USER` (`aquitania.boyaca` por defecto), que sí es
+variable de entorno de la Lambda.
+
+El caché de sesión de `interClient.mjs` está indexado por usuario **y** hash de
+la contraseña, justamente porque esta es dinámica: si estuviera indexado solo
+por usuario, una request con la contraseña equivocada reutilizaría el token de
+un login anterior correcto.
+
 ## Antes del primer deploy
 
-1. **Secret en GitHub**: `INTER_PASSWORD` con la contraseña del portal.
-   Sin eso, `terraform plan` falla pidiendo `var.inter_password`.
-2. **Rol OIDC**: el workflow asume `arn:aws:iam::140862068477:role/github-ci-cd`
+1. **Rol OIDC**: el workflow asume `arn:aws:iam::140862068477:role/github-ci-cd`
    (el mismo de go-pos). Necesita permisos para Lambda, API Gateway, Cognito,
    IAM, CloudWatch Logs y el bucket de state. Si el rol quedó acotado a los
-   recursos de go-pos, hay que ampliarlo.
+   recursos de go-pos, hay que ampliarlo. Es el único requisito previo.
 
 ## Deploy
 
@@ -37,7 +53,7 @@ Manual desde local (requiere credenciales AWS):
 cd infra
 terraform init -reconfigure \
   -backend-config="bucket=system-delivery-inter-tfstate-140862068477"
-terraform plan -var="env=dev" -var="inter_password=<la-contraseña>"
+terraform plan -var="env=dev"
 ```
 
 > `scripts/build-lambda.sh` copia `controller/interClient.mjs` y
@@ -76,7 +92,7 @@ TOKEN=$(curl -s -X POST "$(terraform output -raw cognito_token_endpoint)" \
 curl -s -X POST "$(terraform output -raw consult_endpoint)" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"guias":["<numero-de-guia>"]}' | jq
+  -d '{"guias":["<numero-de-guia>"],"password":"<la-del-operador>"}' | jq
 ```
 
 Un `401` es token ausente o inválido; un `403` suele ser el scope

@@ -66,7 +66,10 @@ export async function getInterToken(): Promise<string> {
 }
 
 /** Un solo lote. Falla si `guias` supera MAX_GUIAS_POR_LOTE. */
-async function consultarLote(guias: string[]): Promise<GuiaConsultada[]> {
+async function consultarLote(
+  guias: string[],
+  password: string
+): Promise<GuiaConsultada[]> {
   const token = await getInterToken();
 
   const res = await fetch(`${API_URL}/consult`, {
@@ -75,7 +78,7 @@ async function consultarLote(guias: string[]): Promise<GuiaConsultada[]> {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ guias }),
+    body: JSON.stringify({ guias, password }),
   });
 
   if (!res.ok) {
@@ -88,6 +91,11 @@ async function consultarLote(guias: string[]): Promise<GuiaConsultada[]> {
 /**
  * Consulta cualquier cantidad de guías, troceando en lotes.
  *
+ * `password` es la del operador en el portal de Inter y viaja en cada request:
+ * no es configuración del backend. No la guardes en localStorage ni la pongas
+ * en la URL; pedila en el formulario y mantenela en memoria mientras dure la
+ * operación.
+ *
  * Los lotes van EN SERIE a propósito: cada uno abre su propia sesión contra el
  * portal de Inter, y mandarlos en paralelo es la forma más rápida de que el
  * WAF empiece a rechazar. Con guías de sobra esto tarda, así que `onProgreso`
@@ -95,13 +103,14 @@ async function consultarLote(guias: string[]): Promise<GuiaConsultada[]> {
  */
 export async function consultarGuias(
   guias: string[],
+  password: string,
   onProgreso?: (parcial: GuiaConsultada[], listas: number, total: number) => void
 ): Promise<GuiaConsultada[]> {
   const resultados: GuiaConsultada[] = [];
 
   for (let i = 0; i < guias.length; i += MAX_GUIAS_POR_LOTE) {
     const lote = guias.slice(i, i + MAX_GUIAS_POR_LOTE);
-    const datos = await consultarLote(lote);
+    const datos = await consultarLote(lote, password);
     resultados.push(...datos);
     onProgreso?.(datos, Math.min(i + lote.length, guias.length), guias.length);
   }
