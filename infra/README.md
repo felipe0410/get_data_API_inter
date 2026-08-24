@@ -12,9 +12,22 @@ Web ──POST /api/inter-token──> Next.js (server) ──> Cognito /oauth2/
  │                                                        │
  │  <──────────────── access_token (scope inter/consult) ─┘
  │
- └──POST /consult  Authorization: Bearer ──> API Gateway ──JWT authorizer──>
-                                                 Lambda ──HTTP──> Interrapidísimo
+ └──POST /consult  Bearer ──> API Gateway ──JWT──> dispatcher
+                                                     ├─ crea jobs_consulta/{jobId}
+                                                     ├─ invoca al worker (async)
+                                                     └─ 202 {jobId} ──> Web
+                                                     ▼
+                                                  worker  (hasta 15 min)
+                                                    1 login para todo el job
+                                                    escribe envios/{guia}
+                                                    actualiza jobs_consulta/{jobId}
+
+Web: onSnapshot(jobs_consulta/{jobId}) -> barra de progreso
 ```
+
+La invocación asíncrona es lo que saca el trabajo de la ventana de 30s del API
+Gateway. El dispatcher responde en cuanto encola; nadie espera al worker, así
+que si la pestaña se cierra a la mitad el job termina igual.
 
 ## La contraseña del portal
 
@@ -36,7 +49,10 @@ un login anterior correcto.
 
 ## Antes del primer deploy
 
-1. **Rol OIDC**: el workflow asume `arn:aws:iam::140862068477:role/github-ci-cd`
+1. **Secret en GitHub**: `FIREBASE_SA_JSON` con el Service Account de Firebase,
+   igual que en go-pos. El worker escribe en Firestore, así que sin eso no
+   arranca. (El de la contraseña de Inter NO existe: esa viaja en la request.)
+2. **Rol OIDC**: el workflow asume `arn:aws:iam::140862068477:role/github-ci-cd`
    (el mismo de go-pos). Necesita permisos para Lambda, API Gateway, Cognito,
    IAM, CloudWatch Logs y el bucket de state. Si el rol quedó acotado a los
    recursos de go-pos, hay que ampliarlo. Es el único requisito previo.
@@ -69,6 +85,7 @@ terraform plan -var="env=dev"
 terraform output consult_endpoint        # URL para la web
 terraform output cognito_token_endpoint  # URL del token
 terraform output cliente_client_ids      # client_id por consumidor
+terraform output coleccion_jobs          # colección de progreso en Firestore
 ```
 
 El `client_secret` no sale por output (Terraform lo dejaría en el state en
@@ -92,27 +109,45 @@ TOKEN=$(curl -s -X POST "$(terraform output -raw cognito_token_endpoint)" \
 curl -s -X POST "$(terraform output -raw consult_endpoint)" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"guias":["<numero-de-guia>"],"password":"<la-del-operador>"}' | jq
+  -d '{"items":[{"guide":"<numero-de-guia>"}],"password":"<la-del-operador>"}' | jq
+# -> 202 {"jobId":"job_...", ...}
+# El resultado no viene en la respuesta: mirar jobs_consulta/{jobId} y
+# envios/{guia} en Firestore.
 ```
 
 Un `401` es token ausente o inválido; un `403` suele ser el scope
 (`inter/consult`) faltando en el token, que la ruta exige explícitamente.
 
-## El tope de guías
+## Volumen y tiempos
 
-`MAX_GUIAS` (default **15**) sale de que el API Gateway HTTP corta a los 30s y
-la Lambda consulta las guías en serie con `INTER_DELAY_MS` de pausa entre cada
-una. Pasado el tope, la Lambda responde `400` de inmediato en vez de morir a
-mitad de camino. La web trocea en lotes (ver `client-snippets/interApi.ts`).
+Un job = **un login = una sesión** contra el portal, sin importar cuántas guías
+traiga. Ese era el costo de trocear desde la web: ~15s de login por cada lote.
 
-Para calibrarlo con datos reales, mirar en CloudWatch la línea
-`[consult] N/M guías en Xms` y ajustar `-var="max_guias=..."`. Si el número
-real que se necesita no entra en 30s, ahí sí toca la versión asíncrona con
-cola.
+Con ~1,5-2s por guía, 200 guías son 5-7 min: entran en una sola corrida del
+worker, que tiene 15 min. Si un job no entra, el worker corta a los
+`PRESUPUESTO_MS` (12 min por defecto), se reinvoca con lo que falta y sube
+`tramo` en el doc del job. O sea que el techo no es una cantidad de guías sino
+cuántos tramos estés dispuesto a esperar. Cada tramo nuevo hace su propio
+login, porque es otra invocación y probablemente otro contenedor.
+
+`MAX_GUIAS` (500) es una guarda de cordura para atajar un typo o un bucle, no
+un límite técnico.
+
+Para calibrar con datos reales: el campo `msPorGuia` del job trae el promedio
+medido, y en CloudWatch está la línea `[worker] job ... completado`.
+
+## Reintentos
+
+El worker corre con `maximum_retry_attempts = 0`. Por defecto Lambda reintenta
+dos veces una invocación asíncrona fallida, y acá eso significaría volver a
+consultar guías ya consultadas y reescribir documentos. El estado del job en
+Firestore es el registro de lo que pasó; reintentar es decisión de quien lo
+mira.
 
 ## Lo que NO aplica acá
 
 El modo de respaldo con Playwright (`INTER_MODE=playwright`) **no funciona en
 Lambda**: no hay navegadores en el runtime ni espacio razonable para meterlos.
 El respaldo vive en el ECS. Si el cliente HTTP se rompe, el plan B es apuntar
-la web de vuelta al ECS con `INTER_MODE=playwright`.
+la web de vuelta al ECS con `INTER_MODE=playwright` — con la ventana de 30s de
+vuelta, o sea troceando desde la web.

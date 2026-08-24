@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# Sincroniza el código del controlador a la carpeta que Terraform empaqueta.
+# Prepara lambda/consult/ para que Terraform la empaquete.
 #
-# `controller/` es la única fuente de verdad: la Lambda no tiene una copia
-# propia que se pueda desincronizar. Este script la refresca antes de cada
-# `terraform plan/apply`, y `lambda/consult/lib/` está en .gitignore.
+#   vendor/       <- copia de controller/*.mjs (generado, gitignored)
+#   node_modules/ <- dependencias (generado, gitignored)
+#
+# `controller/` es la única fuente de verdad del scraper: la Lambda no tiene
+# una copia propia versionada que se pueda desincronizar. Esto corre ANTES de
+# cualquier `terraform plan/apply`, porque archive_file lee el directorio al
+# planificar, no al aplicar.
 set -euo pipefail
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DESTINO="$RAIZ/lambda/consult/lib"
+PAQUETE="$RAIZ/lambda/consult"
+VENDOR="$PAQUETE/vendor"
 
-mkdir -p "$DESTINO"
-cp "$RAIZ/controller/interClient.mjs" "$DESTINO/interClient.mjs"
-cp "$RAIZ/controller/index.mjs"       "$DESTINO/consult.mjs"
+mkdir -p "$VENDOR"
+cp "$RAIZ/controller/interClient.mjs" "$VENDOR/interClient.mjs"
+cp "$RAIZ/controller/index.mjs"       "$VENDOR/consult.mjs"
 
-echo "Lambda lista: $(cd "$RAIZ" && ls lambda/consult/lib)"
+# --omit=dev: el zip de la Lambda no necesita nada de desarrollo.
+npm ci --omit=dev --prefix "$PAQUETE"
+
+echo "Lambda lista:"
+echo "  vendor/       $(ls "$VENDOR" | tr '\n' ' ')"
+echo "  node_modules/ $(ls "$PAQUETE/node_modules" | wc -l) paquetes"

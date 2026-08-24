@@ -1,9 +1,14 @@
 # ============================================================================
-# ⚡ Lambda - Consulta de guías en Interrapidísimo
+# ⚡ Lambdas - Consulta de guías (dispatcher + worker)
 # ============================================================================
-# El código se empaqueta desde lambda/consult/, que scripts/build-lambda.sh
-# rellena copiando controller/*.mjs. No hay node_modules: la Lambda usa solo
-# `crypto` y el `fetch` global de Node 20.
+# Dos funciones sobre EL MISMO zip, cambiando solo el handler:
+#
+#   dispatcher  atiende POST /consult, crea el job, invoca al worker y
+#               responde 202. Vive dentro de la ventana del API Gateway.
+#   worker      corre asíncrono, sin nadie esperándolo, y escribe en Firestore.
+#               Ahí es donde el trabajo puede durar minutos.
+#
+# El paquete lo arma scripts/build-lambda.sh (vendor/ + node_modules).
 # ============================================================================
 
 variable "inter_user" {
@@ -12,16 +17,28 @@ variable "inter_user" {
   default     = "aquitania.boyaca"
 }
 
+variable "firebase_sa_json" {
+  description = "Service Account JSON de Firebase (inyectado desde GitHub Secrets)"
+  type        = string
+  sensitive   = true
+}
+
 variable "max_guias" {
-  description = "Tope de guías por request. Existe por el corte de 30s del API Gateway."
+  description = "Tope de guías por job que acepta el dispatcher"
   type        = number
-  default     = 15
+  default     = 500
 }
 
 variable "inter_delay_ms" {
   description = "Pausa entre consultas de guías, para no gatillar el WAF"
   type        = number
   default     = 500
+}
+
+variable "presupuesto_ms" {
+  description = "Tiempo que trabaja un tramo antes de encadenar el siguiente"
+  type        = number
+  default     = 720000 # 12 min de los 15 que da Lambda
 }
 
 resource "aws_iam_role" "lambda_consult" {
@@ -57,6 +74,16 @@ resource "aws_iam_role_policy" "lambda_consult" {
           "logs:PutLogEvents"
         ]
         Resource = "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/lambda/*"
+      },
+      {
+        # El dispatcher invoca al worker, y el worker se invoca a sí mismo para
+        # encadenar tramos cuando un job no entra en una sola corrida.
+        Sid    = "InvokeWorker"
+        Effect = "Allow"
+        Action = "lambda:InvokeFunction"
+        Resource = [
+          "arn:aws:lambda:${local.region}:${local.account_id}:function:${local.prefix}-worker-${var.env}"
+        ]
       }
     ]
   })
@@ -68,46 +95,91 @@ data "archive_file" "lambda_consult" {
   output_path = "${path.module}/../lambda/consult.zip"
 }
 
-resource "aws_lambda_function" "consult" {
-  provider = aws.main
-  # 29s: uno menos que el corte duro del API Gateway, para que el error que ve
-  # el cliente sea el de la Lambda (con log) y no un 504 opaco de la puerta.
-  function_name    = "${local.prefix}-consult-${var.env}"
+locals {
+  lambda_env_comun = {
+    INTER_USER       = var.inter_user
+    INTER_DELAY_MS   = tostring(var.inter_delay_ms)
+    MAX_GUIAS        = tostring(var.max_guias)
+    FIREBASE_SA_JSON = var.firebase_sa_json
+  }
+}
+
+# --- Dispatcher: responde el 202 ---------------------------------------------
+resource "aws_lambda_function" "dispatcher" {
+  provider         = aws.main
+  function_name    = "${local.prefix}-dispatcher-${var.env}"
   role             = aws_iam_role.lambda_consult.arn
-  handler          = "index.handler"
+  handler          = "dispatcher.handler"
   runtime          = "nodejs20.x"
-  timeout          = 29
+  timeout          = 15
   memory_size      = 512
   filename         = data.archive_file.lambda_consult.output_path
   source_code_hash = data.archive_file.lambda_consult.output_base64sha256
 
-  # La contraseña del portal NO va acá: es del operador y llega en el body de
-  # cada request. Meterla como variable de entorno la volvería única y
-  # compartida, que es justo lo contrario de como funciona.
   environment {
-    variables = {
-      INTER_USER     = var.inter_user
-      INTER_DELAY_MS = tostring(var.inter_delay_ms)
-      MAX_GUIAS      = tostring(var.max_guias)
-    }
+    variables = merge(local.lambda_env_comun, {
+      WORKER_FUNCTION_NAME = "${local.prefix}-worker-${var.env}"
+    })
   }
 
   tags = { Component = "Lambda" }
 }
 
-resource "aws_cloudwatch_log_group" "lambda_consult" {
+# --- Worker: el trabajo largo ------------------------------------------------
+resource "aws_lambda_function" "worker" {
+  provider = aws.main
+  # 15 min es el techo de Lambda. El worker corta a los 12 (presupuesto_ms) y
+  # encadena otro tramo, así que el techo real del job es la paciencia, no esto.
+  function_name    = "${local.prefix}-worker-${var.env}"
+  role             = aws_iam_role.lambda_consult.arn
+  handler          = "worker.handler"
+  runtime          = "nodejs20.x"
+  timeout          = 900
+  memory_size      = 1024
+  filename         = data.archive_file.lambda_consult.output_path
+  source_code_hash = data.archive_file.lambda_consult.output_base64sha256
+
+  environment {
+    variables = merge(local.lambda_env_comun, {
+      PRESUPUESTO_MS = tostring(var.presupuesto_ms)
+    })
+  }
+
+  tags = { Component = "Lambda" }
+}
+
+# Sin reintentos automáticos. Por defecto Lambda reintenta 2 veces una
+# invocación asíncrona que falla, y acá eso significaría volver a consultar
+# guías ya consultadas y reescribir documentos. El estado del job en Firestore
+# es el registro de lo que pasó; reintentar es decisión de quien lo mira.
+resource "aws_lambda_function_event_invoke_config" "worker" {
+  provider                     = aws.main
+  function_name                = aws_lambda_function.worker.function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 3600
+}
+
+resource "aws_cloudwatch_log_group" "lambda_dispatcher" {
   provider          = aws.main
-  name              = "/aws/lambda/${aws_lambda_function.consult.function_name}"
+  name              = "/aws/lambda/${aws_lambda_function.dispatcher.function_name}"
   retention_in_days = 14
 
   tags = { Component = "CloudWatch" }
 }
 
-resource "aws_lambda_permission" "apigw_invoke_consult" {
+resource "aws_cloudwatch_log_group" "lambda_worker" {
+  provider          = aws.main
+  name              = "/aws/lambda/${aws_lambda_function.worker.function_name}"
+  retention_in_days = 14
+
+  tags = { Component = "CloudWatch" }
+}
+
+resource "aws_lambda_permission" "apigw_invoke_dispatcher" {
   provider      = aws.main
-  statement_id  = "AllowAPIGatewayInvokeConsult"
+  statement_id  = "AllowAPIGatewayInvokeDispatcher"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.consult.function_name
+  function_name = aws_lambda_function.dispatcher.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.inter.execution_arn}/*/*"
 }

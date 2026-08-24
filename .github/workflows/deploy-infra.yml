@@ -58,6 +58,11 @@ jobs:
       # Copia controller/*.mjs a lambda/consult/lib/. Tiene que correr ANTES de
       # cualquier comando de Terraform: archive_file lee el directorio al hacer
       # el plan, no al aplicar.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Build Lambda package
         run: ./scripts/build-lambda.sh
         working-directory: .
@@ -78,6 +83,8 @@ jobs:
 
       - name: Terraform Plan
         id: plan
+        env:
+          TF_VAR_firebase_sa_json: ${{ secrets.FIREBASE_SA_JSON }}
         run: terraform plan -var="env=dev" -var="aws_region=${{ env.AWS_REGION }}" -no-color -out=tfplan
         continue-on-error: true
 
@@ -87,4 +94,6 @@ jobs:
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/feat/lambda-consult'
+        env:
+          TF_VAR_firebase_sa_json: ${{ secrets.FIREBASE_SA_JSON }}
         run: terraform apply -auto-approve tfplan

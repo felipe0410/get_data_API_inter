@@ -37,7 +37,7 @@ resource "aws_apigatewayv2_integration" "lambda_consult" {
   provider               = aws.main
   api_id                 = aws_apigatewayv2_api.inter.id
   integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.consult.invoke_arn
+  integration_uri        = aws_lambda_function.dispatcher.invoke_arn
   payload_format_version = "2.0"
 }
 

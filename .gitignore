@@ -12,5 +12,5 @@ tfplan
 
 # Lambda: build generado por scripts/build-lambda.sh. La fuente de verdad es
 # controller/, no una copia versionada que se desincroniza en silencio.
-lambda/consult/lib/
+lambda/consult/vendor/
 lambda/*.zip

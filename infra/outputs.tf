@@ -8,12 +8,22 @@ output "consult_endpoint" {
   value       = "${aws_apigatewayv2_stage.default.invoke_url}/consult"
 }
 
-output "lambda_consult_name" {
-  description = "Nombre de la función Lambda de consulta"
-  value       = aws_lambda_function.consult.function_name
+output "lambda_dispatcher_name" {
+  description = "Lambda que atiende POST /consult y responde 202"
+  value       = aws_lambda_function.dispatcher.function_name
 }
 
-output "max_guias_por_request" {
-  description = "Tope de guías por llamada. La web debe trocear en lotes de este tamaño."
+output "lambda_worker_name" {
+  description = "Lambda que consulta las guías y escribe en Firestore"
+  value       = aws_lambda_function.worker.function_name
+}
+
+output "max_guias_por_job" {
+  description = "Tope de guías que acepta el dispatcher en un solo job"
   value       = var.max_guias
+}
+
+output "coleccion_jobs" {
+  description = "Colección de Firestore donde la web sigue el progreso del job"
+  value       = "jobs_consulta"
 }

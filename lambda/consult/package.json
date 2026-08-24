@@ -1,8 +1,11 @@
 {
   "name": "inter-consult-lambda",
   "version": "1.0.0",
-  "description": "Lambda de consulta de guías en Interrapidisimo (HTTP puro, sin dependencias)",
+  "description": "Consulta de guias en Interrapidisimo: dispatcher (202 + jobId) y worker (scraping + escritura en Firestore)",
   "type": "module",
-  "main": "index.mjs",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.658.0",
+    "firebase-admin": "^12.7.0"
+  }
 }
