@@ -39,13 +39,23 @@ async function apiLogin(body) {
 
 // ---------------------------------------------------------------------------
 // Caché del keyinter (JWT de la app, vive 30 min). Evita re-login por request.
-// La caché depende de las credenciales usadas.
+//
+// La clave incluye un hash de la contraseña, no solo el usuario: la contraseña
+// llega en cada request y puede cambiar (rotación, o simplemente venir mal
+// escrita). Con la clave solo por usuario, una request con la contraseña
+// equivocada reutilizaba el token de un login anterior correcto y respondía
+// como si nada. Se hashea para no dejar la contraseña en claro en memoria.
 // ---------------------------------------------------------------------------
-const tokenCache = new Map(); // user -> { keyinter, exp(ms), inflight }
+const tokenCache = new Map(); // claveCache -> { keyinter, exp(ms), inflight }
+
+function claveCache(user, pass) {
+  return user + ":" + crypto.createHash("sha256").update(pass).digest("hex");
+}
 
 export async function getKeyinter(user, pass) {
   const now = Date.now();
-  const cached = tokenCache.get(user);
+  const clave = claveCache(user, pass);
+  const cached = tokenCache.get(clave);
   // Reutiliza si quedan >60s de vida
   if (cached?.keyinter && cached.exp - now > 60_000) return cached.keyinter;
   if (cached?.inflight) return cached.inflight;
@@ -69,15 +79,15 @@ export async function getKeyinter(user, pass) {
       const p = JSON.parse(Buffer.from(keyinter.split(".")[1], "base64").toString());
       if (p.exp) exp = p.exp * 1000;
     } catch {}
-    tokenCache.set(user, { keyinter, exp });
+    tokenCache.set(clave, { keyinter, exp });
     return keyinter;
   })();
 
-  tokenCache.set(user, { ...(cached || {}), inflight });
+  tokenCache.set(clave, { ...(cached || {}), inflight });
   try {
     return await inflight;
   } catch (e) {
-    tokenCache.delete(user); // no cachear fallos
+    tokenCache.delete(clave); // no cachear fallos
     throw e;
   }
 }
