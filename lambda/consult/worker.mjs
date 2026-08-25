@@ -200,6 +200,11 @@ export const handler = async (event) => {
     // viva entre guías; no se reabre por cada una.
     const keyinter = await getKeyinter(USER, password);
     const session = await openSession(keyinter);
+    // El login pesa ~16s y es fijo por tramo, no por guía. Medirlo aparte es lo
+    // que hace que msPorGuia sirva para estimar: con un job de una guía, un
+    // promedio que lo incluya dice 16s cuando la consulta tarda 1.
+    const msLogin = Date.now() - inicio;
+    const inicioConsultas = Date.now();
 
     while (pendientes.length) {
       // Cortar ANTES de quedarse sin tiempo: lo que falta va a otro tramo.
@@ -226,7 +231,7 @@ export const handler = async (event) => {
     // hay que acarrear los documentos de un tramo al siguiente.
     const wa = guardadas ? await notificar(docs, domiciliary) : null;
 
-    const transcurrido = Date.now() - inicio;
+    const transcurrido = Date.now() - inicioConsultas;
     const procesadas = docs.length + sinDatos + errores.length;
 
     // Un solo arrayUnion con todo: si `errores` apareciera dos veces en el
@@ -247,7 +252,9 @@ export const handler = async (event) => {
             whatsappFallidos: FieldValue.increment(wa.fallidos),
           }
         : {}),
+      // Sin el login: es el numero con el que se estima cuanto tarda un job.
       msPorGuia: procesadas ? Math.round(transcurrido / procesadas) : null,
+      msLogin,
       actualizadoEn: FieldValue.serverTimestamp(),
     });
 
