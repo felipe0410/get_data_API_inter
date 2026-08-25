@@ -5,7 +5,9 @@ output "api_gateway_url" {
 
 output "consult_endpoint" {
   description = "Endpoint completo de consulta de guías"
-  value       = "${aws_apigatewayv2_stage.default.invoke_url}/consult"
+  # invoke_url del stage $default ya viene con la barra final. Sin el trimsuffix
+  # queda "...amazonaws.com//consult", que no matchea la ruta y da 404.
+  value = "${trimsuffix(aws_apigatewayv2_stage.default.invoke_url, "/")}/consult"
 }
 
 output "lambda_dispatcher_name" {

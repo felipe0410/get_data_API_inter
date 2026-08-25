@@ -14,3 +14,6 @@ tfplan
 # controller/, no una copia versionada que se desincroniza en silencio.
 lambda/consult/vendor/
 lambda/*.zip
+
+# Secretos de la prueba manual (scripts/probar-consult.mjs)
+scripts/.prueba.env
