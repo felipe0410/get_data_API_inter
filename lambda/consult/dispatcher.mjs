@@ -104,6 +104,10 @@ export const handler = async (event) => {
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const domiciliary = body.domiciliary === true;
+  // Modo prueba: escribe en envios_prueba y no manda WhatsApp. Sirve para
+  // correr guías reales contra el portal sin tocar producción ni avisarle a
+  // nadie, y poder comparar el resultado con lo que ya hay en envios.
+  const modoPrueba = body.modoPrueba === true;
 
   // El job se crea ACÁ y no en el worker para que la web tenga algo a lo que
   // suscribirse en cuanto recibe el 202, sin una ventana en que el doc no
@@ -112,6 +116,7 @@ export const handler = async (event) => {
     jobId,
     estado: ESTADOS.ENCOLADO,
     domiciliary,
+    modoPrueba,
     total: unicas.length,
     procesadas: 0,
     guardadas: 0,
@@ -129,7 +134,7 @@ export const handler = async (event) => {
         FunctionName: WORKER,
         InvocationType: "Event", // asíncrono: no espera al worker
         Payload: Buffer.from(
-          JSON.stringify({ jobId, items: unicas, password, domiciliary, tramo: 0 })
+          JSON.stringify({ jobId, items: unicas, password, domiciliary, modoPrueba, tramo: 0 })
         ),
       })
     );
@@ -146,6 +151,8 @@ export const handler = async (event) => {
   console.log(`[dispatcher] job ${jobId} encolado con ${unicas.length} guías`);
   return response(202, {
     jobId,
+    modoPrueba,
+    coleccionDestino: modoPrueba ? "envios_prueba" : "envios",
     total: unicas.length,
     duplicadasDescartadas: items.length - unicas.length,
     coleccionJob: "jobs_consulta",

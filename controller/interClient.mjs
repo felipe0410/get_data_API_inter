@@ -144,19 +144,29 @@ function hiddens(html) {
   }
   return out;
 }
+// Los datos del portal traen basura de control: se han visto bytes NUL en
+// medio de nombres, direcciones y celulares. Playwright los ocultaba porque el
+// navegador los convertía en U+FFFD al leer el DOM; por HTTP llegan crudos, y
+// un \u0000 dentro de un placeholder de plantilla puede hacer que Infobip
+// rechace el mensaje. Se limpian al extraer, no en `hiddens`: el __VIEWSTATE
+// no se toca.
+function limpiarControl(v) {
+  return typeof v === "string" ? v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "") : v;
+}
+
 export function inputByName(html, name) {
   const safe = name.replace(/[$]/g, "\\$");
   const m = html.match(new RegExp(`<input[^>]*name="${safe}"[^>]*>`, "i"));
   if (!m) return null;
   const v = m[0].match(/value="([^"]*)"/);
-  return v ? decodeHtml(v[1]) : "";
+  return v ? limpiarControl(decodeHtml(v[1])) : "";
 }
 export function inputById(html, id) {
   const safe = id.replace(/[$]/g, "\\$");
   const m = html.match(new RegExp(`<input[^>]*id="${safe}"[^>]*>`, "i"));
   if (!m) return null;
   const v = m[0].match(/value="([^"]*)"/);
-  return v ? decodeHtml(v[1]) : "";
+  return v ? limpiarControl(decodeHtml(v[1])) : "";
 }
 // Filas de la tabla de gestiones (gvGestionApp), sin el header.
 export function gestionRows(html) {
@@ -168,7 +178,7 @@ export function gestionRows(html) {
   const out = [];
   for (let i = 1; i < rows.length; i++) {
     const cells = [...rows[i][1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((c) =>
-      decodeHtml(c[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
+      limpiarControl(decodeHtml(c[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()))
     );
     if (cells.length >= 3)
       out.push({ fecha: cells[0], tipo: cells[1], descripcion: cells[2] });

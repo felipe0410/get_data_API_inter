@@ -37,6 +37,10 @@ const NOTIFY_TOKEN = process.env.NOTIFY_TOKEN;
 // último writeBatch y para invocar la continuación.
 const PRESUPUESTO_MS = Number(process.env.PRESUPUESTO_MS ?? 12 * 60_000);
 
+// Cada cuántas guías se vuelca el avance a Firestore. Es el paso de la barra
+// de progreso que ve el operador, y el tamaño del lote de WhatsApp.
+const CHECKPOINT = Number(process.env.CHECKPOINT ?? 20);
+
 /** "12.500" -> 12500. Igual que convertirMonedaANumero en la web. */
 function monedaANumero(monto) {
   if (typeof monto !== "string") return 0;
@@ -121,8 +125,8 @@ function armarDoc(html, item, domiciliary) {
   return limpiarUndefined(base);
 }
 
-async function guardar(docs) {
-  const enviosRef = db.collection("envios");
+async function guardar(docs, coleccion) {
+  const enviosRef = db.collection(coleccion);
   let guardados = 0;
   for (let i = 0; i < docs.length; i += BATCH_LIMIT) {
     const chunk = docs.slice(i, i + BATCH_LIMIT);
@@ -179,7 +183,9 @@ async function notificar(docs, domiciliary) {
 }
 
 export const handler = async (event) => {
-  const { jobId, items, password, domiciliary, tramo = 0 } = event;
+  const { jobId, items, password, domiciliary, modoPrueba = false, tramo = 0 } = event;
+  // En modo prueba nada toca producción: otra colección y sin WhatsApp.
+  const coleccion = modoPrueba ? "envios_prueba" : "envios";
   const ref = jobRef(jobId);
   const inicio = Date.now();
 
@@ -195,16 +201,72 @@ export const handler = async (event) => {
   let sinDatos = 0;
   let consultadas = 0;
 
+  // Acumulados del tramo, para el log y para decidir el encadenado.
+  let procesadasTramo = 0;
+  let guardadasTramo = 0;
+
   try {
     // Un login para todo el tramo. La sesión (cookie + ViewState) se mantiene
     // viva entre guías; no se reabre por cada una.
     const keyinter = await getKeyinter(USER, password);
     const session = await openSession(keyinter);
-    // El login pesa ~16s y es fijo por tramo, no por guía. Medirlo aparte es lo
+    // El login pesa ~17s y es fijo por tramo, no por guía. Medirlo aparte es lo
     // que hace que msPorGuia sirva para estimar: con un job de una guía, un
-    // promedio que lo incluya dice 16s cuando la consulta tarda 1.
+    // promedio que lo incluya dice 17s cuando la consulta tarda 2.
     const msLogin = Date.now() - inicio;
     const inicioConsultas = Date.now();
+
+    /**
+     * Vuelca a Firestore lo acumulado hasta ahora: guarda los documentos,
+     * notifica y actualiza los contadores del job.
+     *
+     * Se llama cada CHECKPOINT guías y no solo al final del tramo. Con 200
+     * guías el tramo dura ~7 min, y actualizar el job una sola vez dejaba a la
+     * web mirando "0/200" todo ese rato para después saltar al total: la barra
+     * de progreso que ve el operador no mostraba nada. De paso acota la memoria
+     * y hace que un fallo del contenedor no se lleve el tramo entero.
+     */
+    async function volcar() {
+      const procesadas = docs.length + sinDatos + errores.length;
+      if (!procesadas) return;
+
+      const guardadas = docs.length ? await guardar(docs, coleccion) : 0;
+
+      // Se notifica por bloque y no al final del job: así los destinatarios de
+      // las primeras guías reciben el mensaje sin esperar a que termine todo.
+      const wa = guardadas && !modoPrueba ? await notificar(docs, domiciliary) : null;
+
+      // Un solo arrayUnion con todo: si `errores` apareciera dos veces en el
+      // literal, la segunda clave pisaría a la primera y se perderían los
+      // fallos de guía cuando además falla el WhatsApp.
+      const paraRegistrar = [...errores];
+      if (wa?.error) paraRegistrar.push({ etapa: "whatsapp", message: wa.error });
+
+      procesadasTramo += procesadas;
+      guardadasTramo += guardadas;
+
+      await ref.update({
+        procesadas: FieldValue.increment(procesadas),
+        guardadas: FieldValue.increment(guardadas),
+        sinDatos: FieldValue.increment(sinDatos),
+        // arrayUnion() sin argumentos lanza: el campo solo se toca si hubo algo.
+        ...(paraRegistrar.length ? { errores: FieldValue.arrayUnion(...paraRegistrar) } : {}),
+        ...(wa
+          ? {
+              whatsappEnviados: FieldValue.increment(wa.enviados),
+              whatsappFallidos: FieldValue.increment(wa.fallidos),
+            }
+          : {}),
+        // Sin el login: es el número con el que se estima cuánto tarda un job.
+        msPorGuia: Math.round((Date.now() - inicioConsultas) / procesadasTramo),
+        msLogin,
+        actualizadoEn: FieldValue.serverTimestamp(),
+      });
+
+      docs.length = 0;
+      errores.length = 0;
+      sinDatos = 0;
+    }
 
     while (pendientes.length) {
       // Cortar ANTES de quedarse sin tiempo: lo que falta va a otro tramo.
@@ -222,47 +284,17 @@ export const handler = async (event) => {
         console.error(`[worker] guía ${item.guide}:`, error.message);
         errores.push({ guia: item.guide, message: error.message });
       }
+
+      if (docs.length + sinDatos + errores.length >= CHECKPOINT) await volcar();
     }
 
-    const guardadas = docs.length ? await guardar(docs) : 0;
-
-    // Se notifica por tramo y no al final del job: así los destinatarios de las
-    // primeras guías reciben el mensaje sin esperar a que termine todo, y no
-    // hay que acarrear los documentos de un tramo al siguiente.
-    const wa = guardadas ? await notificar(docs, domiciliary) : null;
-
-    const transcurrido = Date.now() - inicioConsultas;
-    const procesadas = docs.length + sinDatos + errores.length;
-
-    // Un solo arrayUnion con todo: si `errores` apareciera dos veces en el
-    // literal, la segunda clave pisaría a la primera y se perderían los fallos
-    // de guía cuando además falla el WhatsApp.
-    const paraRegistrar = [...errores];
-    if (wa?.error) paraRegistrar.push({ etapa: "whatsapp", message: wa.error });
-
-    await ref.update({
-      procesadas: FieldValue.increment(procesadas),
-      guardadas: FieldValue.increment(guardadas),
-      sinDatos: FieldValue.increment(sinDatos),
-      // arrayUnion() sin argumentos lanza: el campo solo se toca si hubo algo.
-      ...(paraRegistrar.length ? { errores: FieldValue.arrayUnion(...paraRegistrar) } : {}),
-      ...(wa
-        ? {
-            whatsappEnviados: FieldValue.increment(wa.enviados),
-            whatsappFallidos: FieldValue.increment(wa.fallidos),
-          }
-        : {}),
-      // Sin el login: es el numero con el que se estima cuanto tarda un job.
-      msPorGuia: procesadas ? Math.round(transcurrido / procesadas) : null,
-      msLogin,
-      actualizadoEn: FieldValue.serverTimestamp(),
-    });
+    await volcar(); // lo que quedó suelto
 
     // ¿Quedó trabajo? Se encadena otro tramo con las guías que faltan. El
     // tramo nuevo hace su propio login: es el precio de no tener techo.
     if (pendientes.length) {
       console.log(
-        `[worker] job ${jobId} tramo ${tramo}: ${procesadas} listas, ${pendientes.length} para el tramo ${tramo + 1}`
+        `[worker] job ${jobId} tramo ${tramo}: ${procesadasTramo} listas, ${pendientes.length} para el tramo ${tramo + 1}`
       );
       await lambda.send(
         new InvokeCommand({
@@ -274,6 +306,7 @@ export const handler = async (event) => {
               items: pendientes,
               password,
               domiciliary,
+              modoPrueba,
               tramo: tramo + 1,
             })
           ),
@@ -288,7 +321,7 @@ export const handler = async (event) => {
       actualizadoEn: FieldValue.serverTimestamp(),
     });
     console.log(
-      `[worker] job ${jobId} completado: ${guardadas} guardadas, ${sinDatos} sin datos, ${errores.length} con error`
+      `[worker] job ${jobId} completado: ${guardadasTramo} guardadas en ${coleccion}${modoPrueba ? " (modo prueba: sin WhatsApp)" : ""}`
     );
   } catch (error) {
     // Falla de sesión o de login: el job entero no puede seguir.
