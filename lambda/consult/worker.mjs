@@ -10,7 +10,7 @@
 // cada lote.
 // ============================================================================
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import { db, ESTADOS, FieldValue, jobRef } from "./firestore.mjs";
+import { db, ESTADOS, FieldValue, jobRef, procesadosRef } from "./firestore.mjs";
 import {
   delay,
   getKeyinter,
@@ -183,7 +183,10 @@ async function notificar(docs, domiciliary) {
 }
 
 export const handler = async (event) => {
-  const { jobId, items, password, domiciliary, modoPrueba = false, tramo = 0 } = event;
+  const {
+    jobId, items, password, domiciliary,
+    modoPrueba = false, fecha, tipo = "oficina", tramo = 0,
+  } = event;
   // En modo prueba nada toca producción: otra colección y sin WhatsApp.
   const coleccion = modoPrueba ? "envios_prueba" : "envios";
   const ref = jobRef(jobId);
@@ -231,6 +234,26 @@ export const handler = async (event) => {
       if (!procesadas) return;
 
       const guardadas = docs.length ? await guardar(docs, coleccion) : 0;
+
+      // Marcar como procesadas SOLO las que se guardaron bien. Una guía que
+      // falló no entra, así que volver a apretar el botón la reintenta sola.
+      // En modo prueba no se marca nada: si no, la corrida real las saltaría.
+      if (guardadas && fecha && !modoPrueba) {
+        try {
+          await procesadosRef(fecha).set(
+            {
+              [tipo]: FieldValue.arrayUnion(...docs.map((d) => d.uid)),
+              jobs: FieldValue.arrayUnion(jobId),
+              actualizadoEn: FieldValue.serverTimestamp(),
+            },
+            { merge: true } // el doc del día puede no existir todavía
+          );
+        } catch (error) {
+          // No es fatal: los envíos ya están guardados. Lo peor que pasa es
+          // que la próxima corrida vuelva a consultar estas guías.
+          console.error("[worker] no se pudo marcar procesadas:", error.message);
+        }
+      }
 
       // Se notifica por bloque y no al final del job: así los destinatarios de
       // las primeras guías reciben el mensaje sin esperar a que termine todo.
@@ -307,6 +330,8 @@ export const handler = async (event) => {
               password,
               domiciliary,
               modoPrueba,
+              fecha,
+              tipo,
               tramo: tramo + 1,
             })
           ),
