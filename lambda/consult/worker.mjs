@@ -175,10 +175,38 @@ async function notificar(docs, domiciliary) {
     }
     const r = await res.json();
     console.log(`[worker] WhatsApp: ${r.sent}/${r.total} enviados`);
-    return { enviados: r.sent ?? 0, fallidos: r.failed ?? 0, total: r.total ?? shipments.length };
+
+    // La ruta devuelve el detalle por guía y lo estábamos tirando. Sin eso, el
+    // operador ve "18 enviados" y no tiene forma de saber a cuáles dos no les
+    // llegó, que es justo lo accionable.
+    const fallidos = (r.results ?? [])
+      .filter((x) => !x.sent)
+      .map((x) => ({
+        guia: x.uid,
+        telefono: x.phone || null,
+        error: typeof x.error === "string" ? x.error : JSON.stringify(x.error ?? "desconocido"),
+      }));
+
+    return {
+      enviados: r.sent ?? 0,
+      fallidos: r.failed ?? fallidos.length,
+      detalleFallidos: fallidos,
+      total: r.total ?? shipments.length,
+    };
   } catch (error) {
     console.error("[worker] falló la notificación por WhatsApp:", error.message);
-    return { enviados: 0, fallidos: shipments.length, total: shipments.length, error: error.message };
+    // Si la llamada entera falló, no llegó ninguno: se listan todos.
+    return {
+      enviados: 0,
+      fallidos: shipments.length,
+      detalleFallidos: shipments.map((s) => ({
+        guia: s.uid,
+        telefono: s.destinatario?.celular ?? null,
+        error: error.message,
+      })),
+      total: shipments.length,
+      error: error.message,
+    };
   }
 }
 
@@ -201,7 +229,9 @@ export const handler = async (event) => {
   const pendientes = [...items];
   const docs = [];
   const errores = [];
-  let sinDatos = 0;
+  // Las guías sin datos se guardan por número y no como un contador: sin eso,
+  // el operador ve "3 sin datos" y no tiene forma de saber cuáles revisar.
+  const sinDatos = [];
   let consultadas = 0;
 
   // Acumulados del tramo, para el log y para decidir el encadenado.
@@ -230,20 +260,57 @@ export const handler = async (event) => {
      * y hace que un fallo del contenedor no se lleve el tramo entero.
      */
     async function volcar() {
-      const procesadas = docs.length + sinDatos + errores.length;
+      const procesadas = docs.length + sinDatos.length + errores.length;
       if (!procesadas) return;
 
       const guardadas = docs.length ? await guardar(docs, coleccion) : 0;
 
-      // Marcar como procesadas SOLO las que se guardaron bien. Una guía que
-      // falló no entra, así que volver a apretar el botón la reintenta sola.
-      // En modo prueba no se marca nada: si no, la corrida real las saltaría.
-      if (guardadas && fecha && !modoPrueba) {
+      // Se notifica por bloque y no al final del job: así los destinatarios de
+      // las primeras guías reciben el mensaje sin esperar a que termine todo.
+      const wa = guardadas && !modoPrueba ? await notificar(docs, domiciliary) : null;
+
+      // Bitácora del día. Cumple dos funciones a la vez:
+      //
+      //  - `[tipo]` es la lista que usa el dedup. Solo entran las guías que se
+      //    guardaron bien, así que las que fallaron o no trajeron datos se
+      //    reintentan la próxima vez que se aprieta el botón.
+      //  - `resumen` es para mirar: qué se guardó, qué no trajo datos, qué
+      //    falló y por qué. Sin esto el operador ve "3 sin datos" y no tiene
+      //    forma de saber cuáles revisar.
+      //
+      // Todo en un documento por fecha: el estado del día se lee de una.
+      // En modo prueba no se escribe nada, o la corrida real saltaría estas.
+      const huboAlgo = guardadas || sinDatos.length || errores.length;
+      if (huboAlgo && fecha && !modoPrueba) {
         try {
           await procesadosRef(fecha).set(
             {
-              [tipo]: FieldValue.arrayUnion(...docs.map((d) => d.uid)),
+              ...(guardadas
+                ? { [tipo]: FieldValue.arrayUnion(...docs.map((d) => d.uid)) }
+                : {}),
               jobs: FieldValue.arrayUnion(jobId),
+              resumen: {
+                [tipo]: {
+                  guardadas: FieldValue.increment(guardadas),
+                  ...(sinDatos.length
+                    ? { sinDatos: FieldValue.arrayUnion(...sinDatos) }
+                    : {}),
+                  ...(errores.length
+                    ? { errores: FieldValue.arrayUnion(...errores) }
+                    : {}),
+                  ...(wa
+                    ? {
+                        whatsappEnviados: FieldValue.increment(wa.enviados),
+                        whatsappFallidos: FieldValue.increment(wa.fallidos),
+                        ...(wa.detalleFallidos?.length
+                          ? { whatsappSinEnviar: FieldValue.arrayUnion(...wa.detalleFallidos) }
+                          : {}),
+                      }
+                    : {}),
+                  ultimoJob: jobId,
+                  ultimaVez: FieldValue.serverTimestamp(),
+                },
+              },
               actualizadoEn: FieldValue.serverTimestamp(),
             },
             { merge: true } // el doc del día puede no existir todavía
@@ -251,13 +318,9 @@ export const handler = async (event) => {
         } catch (error) {
           // No es fatal: los envíos ya están guardados. Lo peor que pasa es
           // que la próxima corrida vuelva a consultar estas guías.
-          console.error("[worker] no se pudo marcar procesadas:", error.message);
+          console.error("[worker] no se pudo escribir la bitácora:", error.message);
         }
       }
-
-      // Se notifica por bloque y no al final del job: así los destinatarios de
-      // las primeras guías reciben el mensaje sin esperar a que termine todo.
-      const wa = guardadas && !modoPrueba ? await notificar(docs, domiciliary) : null;
 
       // Un solo arrayUnion con todo: si `errores` apareciera dos veces en el
       // literal, la segunda clave pisaría a la primera y se perderían los
@@ -271,7 +334,7 @@ export const handler = async (event) => {
       await ref.update({
         procesadas: FieldValue.increment(procesadas),
         guardadas: FieldValue.increment(guardadas),
-        sinDatos: FieldValue.increment(sinDatos),
+        sinDatos: FieldValue.increment(sinDatos.length),
         // arrayUnion() sin argumentos lanza: el campo solo se toca si hubo algo.
         ...(paraRegistrar.length ? { errores: FieldValue.arrayUnion(...paraRegistrar) } : {}),
         ...(wa
@@ -288,7 +351,7 @@ export const handler = async (event) => {
 
       docs.length = 0;
       errores.length = 0;
-      sinDatos = 0;
+      sinDatos.length = 0;
     }
 
     while (pendientes.length) {
@@ -302,13 +365,13 @@ export const handler = async (event) => {
         const html = await queryGuia(session, item.guide);
         const doc = armarDoc(html, item, domiciliary);
         if (doc) docs.push(doc);
-        else sinDatos++;
+        else sinDatos.push(item.guide);
       } catch (error) {
         console.error(`[worker] guía ${item.guide}:`, error.message);
         errores.push({ guia: item.guide, message: error.message });
       }
 
-      if (docs.length + sinDatos + errores.length >= CHECKPOINT) await volcar();
+      if (docs.length + sinDatos.length + errores.length >= CHECKPOINT) await volcar();
     }
 
     await volcar(); // lo que quedó suelto

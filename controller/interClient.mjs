@@ -242,9 +242,36 @@ async function postback(session, extra) {
 export const GUIA_DELAY_MS = Number(process.env.INTER_DELAY_MS ?? 500);
 export const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Consulta una guía (equivale al clic en "Rastreo Nacional").
+/**
+ * Consulta una guía (equivale al clic en "Rastreo Nacional").
+ *
+ * Verifica que la página devuelta sea la de la guía pedida. El portal a veces
+ * responde con la página anterior —el postback no toma, o el WAF devuelve algo
+ * cacheado— y sin este control esos datos se guardaban como si fueran de la
+ * guía nueva: el 26/08/2026, 18 envíos quedaron con el destinatario y el
+ * teléfono de otra persona, y le llegaron 18 WhatsApp a alguien que no era el
+ * dueño de esos paquetes.
+ *
+ * `tbxNumeroGuia1` es el campo readonly donde el portal repite la guía que
+ * esta mostrando: es el unico eco confiable de la consulta.
+ *
+ * Lanza si no coinciden. Es preferible que la guía quede sin procesar —el
+ * worker la reintenta en la próxima corrida— a escribir datos de otro.
+ */
 export async function queryGuia(session, guia) {
-  return postback(session, { tbxNumeroGuia: guia, btnShow: "Rastreo Nacional" });
+  const html = await postback(session, {
+    tbxNumeroGuia: guia,
+    btnShow: "Rastreo Nacional",
+  });
+
+  const mostrada = inputByName(html, "tbxNumeroGuia1");
+  if (mostrada && mostrada.trim() !== String(guia).trim()) {
+    throw new Error(
+      `El portal respondió con la guía ${mostrada.trim()} en vez de ${guia}`
+    );
+  }
+
+  return html;
 }
 // Cambia de pestaña dentro del TabContainer2.
 export async function switchTab(session, tabIndex) {
