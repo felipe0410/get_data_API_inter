@@ -243,6 +243,23 @@ export const GUIA_DELAY_MS = Number(process.env.INTER_DELAY_MS ?? 500);
 export const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * La respuesta no corresponde a la guía que se pidió: la sesión quedó pegada.
+ *
+ * Es un error recuperable y distinto de todos los demás, así que vale la pena
+ * poder reconocerlo por tipo en vez de leyendo el texto del mensaje. Quien lo
+ * atrapa debería abrir una sesión nueva y reintentar, no dar la guía por
+ * perdida: la sesión se descarta, la guía no.
+ */
+export class GuiaDesincronizada extends Error {
+  constructor(pedida, recibida) {
+    super(`El portal respondió con la guía ${recibida} en vez de ${pedida}`);
+    this.name = "GuiaDesincronizada";
+    this.pedida = String(pedida);
+    this.recibida = String(recibida);
+  }
+}
+
+/**
  * Consulta una guía (equivale al clic en "Rastreo Nacional").
  *
  * Verifica que la página devuelta sea la de la guía pedida. El portal a veces
@@ -266,9 +283,7 @@ export async function queryGuia(session, guia) {
 
   const mostrada = inputByName(html, "tbxNumeroGuia1");
   if (mostrada && mostrada.trim() !== String(guia).trim()) {
-    throw new Error(
-      `El portal respondió con la guía ${mostrada.trim()} en vez de ${guia}`
-    );
+    throw new GuiaDesincronizada(guia, mostrada.trim());
   }
 
   return html;

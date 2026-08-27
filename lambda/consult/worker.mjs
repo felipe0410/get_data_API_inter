@@ -9,11 +9,13 @@
 // traiga. Ese era el costo grande de trocear desde la web: ~15s de login por
 // cada lote.
 // ============================================================================
+import { createHash } from "node:crypto";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { db, ESTADOS, FieldValue, jobRef, procesadosRef } from "./firestore.mjs";
 import {
   delay,
   getKeyinter,
+  GuiaDesincronizada,
   GUIA_DELAY_MS,
   inputByName,
   inputById,
@@ -40,6 +42,17 @@ const PRESUPUESTO_MS = Number(process.env.PRESUPUESTO_MS ?? 12 * 60_000);
 // Cada cuántas guías se vuelca el avance a Firestore. Es el paso de la barra
 // de progreso que ve el operador, y el tamaño del lote de WhatsApp.
 const CHECKPOINT = Number(process.env.CHECKPOINT ?? 20);
+
+// Rondas de reintento para las guías que quedaron desincronizadas, y cuánto se
+// espera antes de cada una. La sesión nueva suele arreglarlo en el acto; esta
+// espera es para el caso en que no, que se parece más a un bloqueo temporal
+// del portal y donde insistir de inmediato solo empeora las cosas.
+const MAX_RONDAS = Number(process.env.MAX_RONDAS ?? 3);
+const ESPERA_RONDA_MS = Number(process.env.ESPERA_RONDA_MS ?? 120_000);
+
+// A quién avisarle cuando, después de todas las rondas, quedaron guías sin
+// guardar. Es el único caso que necesita que alguien mire.
+const ALERTA_WHATSAPP = process.env.ALERTA_WHATSAPP || "3105762035";
 
 /** "12.500" -> 12500. Igual que convertirMonedaANumero en la web. */
 function monedaANumero(monto) {
@@ -210,14 +223,105 @@ async function notificar(docs, domiciliary) {
   }
 }
 
+/**
+ * Avisa por WhatsApp que quedaron guías sin guardar.
+ *
+ * Es el único aviso que va a un humano y no a un cliente, así que se manda al
+ * número de la operación. En modo prueba no se manda nada: probar no debería
+ * despertar a nadie.
+ *
+ * El aviso puede no llegar —WhatsApp solo deja mandar texto libre dentro de
+ * las 24h siguientes a un mensaje del destinatario— y por eso no es el único
+ * canal: el fallo queda escrito en el job, que es lo que pinta el tablero de
+ * inicio. El WhatsApp adelanta la noticia; el tablero es el que no se pierde.
+ */
+async function alertar(guias, { jobId, fecha, tipo, modoPrueba, ref }) {
+  if (modoPrueba) {
+    console.log(`[worker] modo prueba: no se manda la alerta de ${guias.length} guías`);
+    return;
+  }
+  if (!WEB_API_BASE) {
+    console.warn("[worker] WEB_API_BASE sin configurar: no se manda la alerta");
+    return;
+  }
+
+  const texto =
+    `⚠️ Quedaron ${guias.length} guías sin guardar (${tipo}, ${fecha}).\n\n` +
+    `${guias.slice(0, 10).join(", ")}${guias.length > 10 ? ` y ${guias.length - 10} más` : ""}\n\n` +
+    `El portal no respondió después de ${MAX_RONDAS} reintentos. Hay que revisar y volver a guardar.`;
+
+  try {
+    const res = await fetch(`${WEB_API_BASE}/api/whatsapp/alerta`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(NOTIFY_TOKEN ? { "x-notify-token": NOTIFY_TOKEN } : {}),
+      },
+      body: JSON.stringify({ telefono: ALERTA_WHATSAPP, texto, jobId }),
+    });
+    const cuerpo = await res.json().catch(() => ({}));
+    if (!res.ok || !cuerpo.enviado) {
+      throw new Error(cuerpo.error || `${res.status}`);
+    }
+    console.log(`[worker] alerta enviada a ${ALERTA_WHATSAPP}`);
+    await ref.update({ alertaEnviada: true, actualizadoEn: FieldValue.serverTimestamp() });
+  } catch (error) {
+    // Que no se pueda avisar no puede tumbar el job: las guías buenas ya están
+    // guardadas y el fallo ya quedó escrito.
+    console.error("[worker] no se pudo mandar la alerta:", error.message);
+    await ref
+      .update({ alertaEnviada: false, alertaError: error.message })
+      .catch(() => {});
+  }
+}
+
+/**
+ * Deja constancia de cuál contraseña autenticó bien contra el portal.
+ *
+ * Guarda un hash, nunca la contraseña. Con eso alcanza para lo único que hace
+ * falta: que la web pueda decir "esta es la que funcionó" en vez de dejar
+ * elegir a ciegas entre varias y descubrir el error 16 segundos después, con
+ * un job fallido de por medio.
+ *
+ * No hace falta guardar la contraseña en claro para que los reintentos sean
+ * automáticos: la contraseña viaja dentro del job, así que cada ronda ya la
+ * tiene. Guardarla en reposo daría un permiso que nadie necesita.
+ */
+async function registrarPasswordBuena(password) {
+  try {
+    const hash = createHash("sha256").update(`inter:${USER}:${password}`).digest("hex");
+    await db.collection("config").doc("inter_auth").set(
+      {
+        hash,
+        usuario: USER,
+        verificadaEn: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    // Es un dato de conveniencia: si no se puede escribir, el job sigue igual.
+    console.error("[worker] no se pudo registrar la contraseña buena:", error.message);
+  }
+}
+
 export const handler = async (event) => {
   const {
     jobId, items, password, domiciliary,
     modoPrueba = false, fecha, tipo = "oficina", tramo = 0,
+    // Ronda de reintento. 0 es la corrida normal; de 1 en adelante son las
+    // guías que quedaron desincronizadas y se vuelven a pedir con sesión nueva.
+    ronda = 0, esperaMs = 0,
   } = event;
   // En modo prueba nada toca producción: otra colección y sin WhatsApp.
   const coleccion = modoPrueba ? "envios_prueba" : "envios";
   const ref = jobRef(jobId);
+
+  // La espera va antes de arrancar el cronómetro: no es tiempo de trabajo y no
+  // debe comerse el presupuesto del tramo.
+  if (esperaMs > 0) {
+    console.log(`[worker] job ${jobId} ronda ${ronda}: esperando ${Math.round(esperaMs / 1000)}s antes de reintentar`);
+    await delay(esperaMs);
+  }
   const inicio = Date.now();
 
   await ref.update({
@@ -232,6 +336,8 @@ export const handler = async (event) => {
   // Las guías sin datos se guardan por número y no como un contador: sin eso,
   // el operador ve "3 sin datos" y no tiene forma de saber cuáles revisar.
   const sinDatos = [];
+  // Guías que fallaron incluso con una sesión recién abierta: van a otra ronda.
+  const desincronizadas = [];
   let consultadas = 0;
 
   // Acumulados del tramo, para el log y para decidir el encadenado.
@@ -242,7 +348,20 @@ export const handler = async (event) => {
     // Un login para todo el tramo. La sesión (cookie + ViewState) se mantiene
     // viva entre guías; no se reabre por cada una.
     const keyinter = await getKeyinter(USER, password);
-    const session = await openSession(keyinter);
+    await registrarPasswordBuena(password);
+    let session = await openSession(keyinter);
+
+    /**
+     * Abre una sesión nueva reusando el token: es un GET, no un login.
+     *
+     * Cuesta ~1s contra los ~16s del login completo, porque el keyinter vive
+     * 30 min y `getKeyinter` lo tiene cacheado. Barato como para usarlo de
+     * forma preventiva y no solo cuando algo ya se rompió.
+     */
+    async function renovarSesion(motivo) {
+      session = await openSession(keyinter);
+      console.log(`[worker] sesión renovada (${motivo})`);
+    }
     // El login pesa ~17s y es fijo por tramo, no por guía. Medirlo aparte es lo
     // que hace que msPorGuia sirva para estimar: con un job de una guía, un
     // promedio que lo incluya dice 17s cuando la consulta tarda 2.
@@ -367,18 +486,48 @@ export const handler = async (event) => {
         if (doc) docs.push(doc);
         else sinDatos.push(item.guide);
       } catch (error) {
-        console.error(`[worker] guía ${item.guide}:`, error.message);
-        errores.push({ guia: item.guide, message: error.message });
+        if (error instanceof GuiaDesincronizada) {
+          // La sesión quedó pegada mostrando otra guía y a partir de aquí
+          // TODAS las respuestas serían esa misma página. Reintentar sobre la
+          // misma sesión no sirve: hay que tirarla y abrir otra.
+          try {
+            await renovarSesion(`desincronizada en ${item.guide}`);
+            const html = await queryGuia(session, item.guide);
+            const doc = armarDoc(html, item, domiciliary);
+            if (doc) docs.push(doc);
+            else sinDatos.push(item.guide);
+          } catch (segundo) {
+            // Con sesión nueva y sigue fallando: esto ya no es una sesión
+            // vencida. Se aparta para una ronda posterior en vez de quemar
+            // las guías que faltan contra un portal que no está respondiendo.
+            console.error(`[worker] guía ${item.guide} sigue fallando con sesión nueva:`, segundo.message);
+            desincronizadas.push(item);
+          }
+        } else {
+          console.error(`[worker] guía ${item.guide}:`, error.message);
+          errores.push({ guia: item.guide, message: error.message });
+        }
       }
 
-      if (docs.length + sinDatos.length + errores.length >= CHECKPOINT) await volcar();
+      if (docs.length + sinDatos.length + errores.length >= CHECKPOINT) {
+        await volcar();
+        // Volcar tarda: escribe en Firestore y manda los WhatsApp del lote. El
+        // portal no aguanta esa pausa y deja la sesión pegada — el 27/08/2026,
+        // con CHECKPOINT en 20, las guías 21 a 29 recibieron todas la página de
+        // la 20. Renovar aquí sale ~1s y evita el problema de raíz.
+        await renovarSesion(`pausa tras volcar ${consultadas} guías`);
+      }
     }
 
     await volcar(); // lo que quedó suelto
 
     // ¿Quedó trabajo? Se encadena otro tramo con las guías que faltan. El
     // tramo nuevo hace su propio login: es el precio de no tener techo.
+    // Las desincronizadas viajan con las pendientes: el tramo siguiente abre
+    // sesión propia, que es justo lo que necesitan.
     if (pendientes.length) {
+      pendientes.push(...desincronizadas);
+      desincronizadas.length = 0;
       console.log(
         `[worker] job ${jobId} tramo ${tramo}: ${procesadasTramo} listas, ${pendientes.length} para el tramo ${tramo + 1}`
       );
@@ -396,11 +545,64 @@ export const handler = async (event) => {
               fecha,
               tipo,
               tramo: tramo + 1,
+              ronda,
             })
           ),
         })
       );
       return;
+    }
+
+    // Quedaron guías que no respondieron ni con sesión nueva. Se reintentan
+    // solas: el operador ya apretó el botón, no tiene por qué volver a hacerlo.
+    if (desincronizadas.length) {
+      if (ronda < MAX_RONDAS) {
+        console.log(
+          `[worker] job ${jobId}: ${desincronizadas.length} guías a la ronda ${ronda + 1} de ${MAX_RONDAS}`
+        );
+        await ref.update({
+          estado: ESTADOS.PROCESANDO,
+          ronda: ronda + 1,
+          reintentando: desincronizadas.map((d) => d.guide),
+          actualizadoEn: FieldValue.serverTimestamp(),
+        });
+        await lambda.send(
+          new InvokeCommand({
+            FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
+            InvocationType: "Event",
+            Payload: Buffer.from(
+              JSON.stringify({
+                jobId,
+                items: desincronizadas,
+                password, // la contraseña viaja con el job: la ronda no la pide
+                domiciliary,
+                modoPrueba,
+                fecha,
+                tipo,
+                tramo: tramo + 1,
+                ronda: ronda + 1,
+                esperaMs: ESPERA_RONDA_MS,
+              })
+            ),
+          })
+        );
+        return;
+      }
+
+      // Se agotaron las rondas. Esto sí necesita que alguien mire.
+      const guias = desincronizadas.map((d) => d.guide);
+      console.error(`[worker] job ${jobId}: ${guias.length} guías sin guardar tras ${MAX_RONDAS} rondas`);
+      await ref.update({
+        errores: FieldValue.arrayUnion(
+          ...guias.map((guia) => ({
+            guia,
+            message: `Sin respuesta del portal tras ${MAX_RONDAS} rondas de reintento`,
+          }))
+        ),
+        sinGuardar: guias,
+        actualizadoEn: FieldValue.serverTimestamp(),
+      });
+      await alertar(guias, { jobId, fecha, tipo, modoPrueba, ref });
     }
 
     await ref.update({
